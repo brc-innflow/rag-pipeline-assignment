@@ -1,0 +1,21 @@
+# Code was generated using AI assistance
+# Requirements for Web-based RAG Ingestion Pipeline
+
+# Web scraping
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+lxml>=5.0.0
+
+# LangChain components
+langchain>=0.2.0
+langchain-community>=0.2.0
+langchain-openai>=0.1.0
+langchain-text-splitters>=0.2.0
+langchain-mongodb>=0.1.0
+
+# MongoDB
+pymongo>=4.6.0
+certifi>=2024.0.0
+
+# Environment variables
+python-dotenv>=1.0.0
