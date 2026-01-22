@@ -2,16 +2,17 @@
 
 Main code is under the kb folder, all other folders are considered scratchpads and testing.
 
-kb\
+```
+kb \
     ingestion.py
     retrieval_naive.py # naive rag used for eval purposes
     retrieval_filtered.py 
     generation.py # uses filtered retrival
-    evals\
+    evals \
         precision_delta.py # compares naive vs filterede
         groundedness_delta.py # compares naive vs filtered
         groundedness.py # just filtered
- 
+ ```
 
 # Documents
 
@@ -27,6 +28,7 @@ Knowing the Product and Subcategory of each KB url allowed me to use that inform
 To ingest the content of each url, the raw html is read in and header tags (h1,h2,h3) are found and thier values used as additional meta data.  Then using langchain WebBasedLoader the content of the entire page is parsed to plain text.  A chunk size of 1500 was used to allow for more context.  The chunks and embeddings are stored in MongoDB and a vector search index applied making use of all the meta data.
 
 ## Ingestion Stats
+```
    Sources processed:  4
    Topics:             Accounting, Accounting, Labor, Facilities
    Total articles:     113
@@ -38,6 +40,7 @@ To ingest the content of each url, the raw html is read in and header tags (h1,h
       - Accounting / ePay: 7 articles, 36 chunks
       - Labor / User Guides: 43 articles, 164 chunks
       - Facilities / User Guides: 10 articles, 34 chunks
+```
 
 # Retrieval
 

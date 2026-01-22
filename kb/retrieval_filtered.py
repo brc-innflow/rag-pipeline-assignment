@@ -1,6 +1,5 @@
 """
-Metadata-Filtered RAG - Retrieval Module (HTML Header-Based)
-Performs metadata filtering BEFORE vector search for more targeted results.
+Metadata-Filtered RAG - Retrieval Module 
 
 Filter Logic: category AND subtopic AND (header_1 OR header_2 OR header_3 OR title)
 
