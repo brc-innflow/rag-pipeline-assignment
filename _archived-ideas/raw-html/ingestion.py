@@ -1,26 +1,23 @@
 """
-Web-based RAG Ingestion Pipeline
-Crawls URLs from a parent page, extracts content, chunks, and stores vectors in MongoDB.
+Code was generated using AI assistance
+
+Web-based RAG Ingestion Pipeline - HTML Header-Based Chunking
+Crawls URLs from a parent page, extracts content using HTML structure, chunks by headers,
+and stores vectors in MongoDB.
+
+This version uses HTMLHeaderTextSplitter to split content based on HTML header tags (h1, h2, h3),
+preserving document structure and adding header hierarchy to chunk metadata.
 
 Usage:
     # Single URL mode:
-    python web_ingestion.py <parent_url> <category>
+    python web_ingestion_html.py <parent_url> <category>
     
     # Batch mode with JSON config file:
-    python web_ingestion.py --config <config_file.json>
+    python web_ingestion_html.py --config <config_file.json>
     
 Examples:
-    python web_ingestion.py "https://support.example.com/folder/123" "Accounting"
-    python web_ingestion.py --config sources.json
-
-Config file format (sources.json):
-    [
-        {"url": "https://support.example.com/folder/123", "topic": "Accounting"},
-        {"url": "https://support.example.com/folder/456", "topic": "Accounting", "subtopic": "Payroll"},
-        {"url": "https://support.example.com/folder/789", "topic": "Inventory", "subtopic": "Stock Management"}
-    ]
-    
-Note: "subtopic" is optional and can be omitted.
+    python web_ingestion_html.py "https://support.example.com/folder/123" "Accounting"
+    python web_ingestion_html.py --config sources.json
 """
 
 import json
@@ -35,8 +32,8 @@ from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
-from langchain_community.document_loaders import WebBaseLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_text_splitters import HTMLHeaderTextSplitter, RecursiveCharacterTextSplitter
+from langchain_core.documents import Document
 from langchain_openai import OpenAIEmbeddings
 from langchain_mongodb import MongoDBAtlasVectorSearch
 from pymongo import MongoClient
@@ -48,14 +45,21 @@ load_dotenv()
 MONGO_DB_URL = os.getenv("MONGO_DB_URL")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# MongoDB configuration
+# MongoDB configuration (separate collection for HTML-based chunking)
 DB_NAME = "rag_assignment"
-COLLECTION_NAME = "kb_articles"
-INDEX_NAME = "kb_vector_index"
+COLLECTION_NAME = "kb_articles_html"
+INDEX_NAME = "kb_vector_index_html"
 
 # Chunking configuration
-CHUNK_SIZE = 1000
-CHUNK_OVERLAP = 200
+CHUNK_SIZE = 1500      # Max size for secondary splitting of large sections
+CHUNK_OVERLAP = 150    # Overlap for secondary splitting
+
+# HTML headers to split on (in order of hierarchy)
+HEADERS_TO_SPLIT_ON = [
+    ("h1", "header_1"),
+    ("h2", "header_2"),
+    ("h3", "header_3"),
+]
 
 # Crawling configuration
 REQUEST_DELAY = 0.3  # Seconds between requests
@@ -96,6 +100,14 @@ class WebCrawler:
         response.raise_for_status()
         log(f"Received {len(response.text)} bytes", "HTTP")
         return BeautifulSoup(response.text, "html.parser")
+    
+    def get_html(self, url: str) -> str:
+        """Fetch URL and return raw HTML string."""
+        log(f"Fetching HTML: {url[:80]}...", "HTTP")
+        response = self.session.get(url, timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+        log(f"Received {len(response.text)} bytes", "HTTP")
+        return response.text
     
     def extract_base_domain(self, url: str) -> str:
         """Extract base domain from URL."""
@@ -238,25 +250,80 @@ def extract_article_title(soup: BeautifulSoup) -> str:
     return "Untitled"
 
 
-def load_and_chunk_urls(urls: list[str], category: str, subtopic: str = None) -> list:
+def extract_main_content(html: str) -> str:
     """
-    Load web pages and split into chunks with metadata.
+    Extract the main content area from HTML, removing navigation, headers, footers.
+    Returns cleaned HTML string focused on the article content.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    
+    # Remove script and style elements
+    for element in soup(["script", "style", "nav", "header", "footer", "aside"]):
+        element.decompose()
+    
+    # Try to find the main content area (common patterns in KB sites)
+    main_content = None
+    content_selectors = [
+        "article",
+        "main",
+        ".article-content",
+        ".article-body",
+        "#article-content",
+        "#article-body",
+        ".content",
+        ".post-content",
+        "[role='main']",
+    ]
+    
+    for selector in content_selectors:
+        main_content = soup.select_one(selector)
+        if main_content:
+            log(f"Found main content using selector: {selector}", "HTML")
+            break
+    
+    # Fall back to body if no main content area found
+    if not main_content:
+        main_content = soup.body if soup.body else soup
+        log("Using full body as main content", "HTML")
+    
+    return str(main_content)
+
+
+def load_and_chunk_urls_html(urls: list[str], category: str, subtopic: str = None, crawler: WebCrawler = None) -> list:
+    """
+    Load web pages and split into chunks using HTML header-based splitting.
+    
+    This approach:
+    1. Fetches raw HTML
+    2. Extracts main content area
+    3. Splits by HTML headers (h1, h2, h3) - preserving document structure
+    4. Further splits large sections with RecursiveCharacterTextSplitter
+    5. Adds header hierarchy to chunk metadata
     
     Args:
         urls: List of URLs to load
         category: Category/topic to tag documents with
         subtopic: Optional subtopic for finer categorization
+        crawler: WebCrawler instance to use for fetching
     """
-    log(f"Starting to load and chunk {len(urls)} URLs", "CHUNK")
+    log(f"Starting HTML header-based chunking for {len(urls)} URLs", "CHUNK")
     log(f"Category tag: {category}", "CHUNK")
     if subtopic:
         log(f"Subtopic tag: {subtopic}", "CHUNK")
-    log(f"Chunk size: {CHUNK_SIZE}, Overlap: {CHUNK_OVERLAP}", "CHUNK")
+    log(f"Headers to split on: {[h[0] for h in HEADERS_TO_SPLIT_ON]}", "CHUNK")
+    log(f"Max chunk size for large sections: {CHUNK_SIZE}", "CHUNK")
+    
+    if crawler is None:
+        crawler = WebCrawler()
     
     all_documents = []
     successful = 0
     failed = 0
     
+    # HTML header splitter - splits on h1, h2, h3 tags
+    html_splitter = HTMLHeaderTextSplitter(headers_to_split_on=HEADERS_TO_SPLIT_ON)
+    
+    # Secondary splitter for large sections
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=CHUNK_SIZE,
         chunk_overlap=CHUNK_OVERLAP,
@@ -272,60 +339,66 @@ def load_and_chunk_urls(urls: list[str], category: str, subtopic: str = None) ->
         log(f"URL: {url}", "LOAD")
         
         try:
-            # Use WebBaseLoader to extract content
-            log("Loading page content with WebBaseLoader...", "LOAD")
-            loader = WebBaseLoader(
-                web_paths=[url],
-                bs_kwargs={"parse_only": None},  # Parse full page
-                requests_kwargs={"timeout": REQUEST_TIMEOUT}
-            )
-            documents = loader.load()
-            log(f"Loaded {len(documents)} document(s) from page", "LOAD")
+            # Fetch raw HTML
+            log("Fetching raw HTML...", "LOAD")
+            raw_html = crawler.get_html(url)
             
-            # Extract title for metadata
-            log("Extracting article title...", "LOAD")
-            try:
-                response = requests.get(url, timeout=REQUEST_TIMEOUT)
-                soup = BeautifulSoup(response.text, "html.parser")
-                title = extract_article_title(soup)
-            except Exception:
-                title = url.rsplit("/", 1)[-1]
-            
+            # Parse for title extraction
+            soup = BeautifulSoup(raw_html, "html.parser")
+            title = extract_article_title(soup)
             log(f"Title: {title[:60]}...", "LOAD")
             
-            # Add metadata to each document before chunking
-            log("Adding metadata to documents...", "META")
-            for doc in documents:
-                doc.metadata["source_url"] = url
-                doc.metadata["category"] = category
-                doc.metadata["title"] = title
-                if subtopic:
-                    doc.metadata["subtopic"] = subtopic
+            # Extract main content area (removes nav, footer, etc.)
+            log("Extracting main content area...", "HTML")
+            main_html = extract_main_content(raw_html)
+            log(f"Main content size: {len(main_html)} chars", "HTML")
             
-            # Split documents into chunks
-            log("Splitting into chunks...", "CHUNK")
-            chunks = text_splitter.split_documents(documents)
-            log(f"Created {len(chunks)} chunks from this document", "CHUNK")
+            # Split by HTML headers
+            log("Splitting by HTML headers (h1, h2, h3)...", "CHUNK")
+            header_splits = html_splitter.split_text(main_html)
+            log(f"Created {len(header_splits)} header-based sections", "CHUNK")
             
-            # Show preview of first chunk
-            if chunks:
-                preview = chunks[0].page_content[:300].replace('\n', ' ')
-                if len(chunks[0].page_content) > 300:
-                    preview += "..."
-                print(f"      [PREVIEW] {preview}")
+            # Log header structure found
+            for j, doc in enumerate(header_splits[:5]):  # Show first 5
+                headers_found = [f"{k}: {v[:30]}..." for k, v in doc.metadata.items() if k.startswith("header")]
+                if headers_found:
+                    log(f"  Section {j+1}: {', '.join(headers_found)}", "CHUNK")
+            if len(header_splits) > 5:
+                log(f"  ... and {len(header_splits) - 5} more sections", "CHUNK")
             
-            # Ensure metadata is preserved on all chunks
-            for chunk in chunks:
+            # Further split large sections
+            log("Splitting large sections if needed...", "CHUNK")
+            final_chunks = []
+            for doc in header_splits:
+                if len(doc.page_content) > CHUNK_SIZE:
+                    # Split large section, preserving metadata
+                    sub_chunks = text_splitter.split_documents([doc])
+                    final_chunks.extend(sub_chunks)
+                else:
+                    final_chunks.append(doc)
+            
+            log(f"Final chunk count: {len(final_chunks)} (from {len(header_splits)} sections)", "CHUNK")
+            
+            # Add our custom metadata to all chunks
+            for chunk in final_chunks:
                 chunk.metadata["source_url"] = url
                 chunk.metadata["category"] = category
                 chunk.metadata["title"] = title
                 if subtopic:
                     chunk.metadata["subtopic"] = subtopic
             
-            all_documents.extend(chunks)
+            # Show preview of first chunk with its metadata
+            if final_chunks:
+                preview = final_chunks[0].page_content[:200].replace('\n', ' ')
+                if len(final_chunks[0].page_content) > 200:
+                    preview += "..."
+                print(f"      [PREVIEW] {preview}")
+                print(f"      [METADATA] {final_chunks[0].metadata}")
+            
+            all_documents.extend(final_chunks)
             successful += 1
             
-            log(f"SUCCESS: {title[:40]}... -> {len(chunks)} chunks", "DONE")
+            log(f"SUCCESS: {title[:40]}... -> {len(final_chunks)} chunks", "DONE")
             log(f"Running total: {len(all_documents)} chunks from {successful} articles", "DONE")
             
             # Rate limiting
@@ -335,6 +408,8 @@ def load_and_chunk_urls(urls: list[str], category: str, subtopic: str = None) ->
         except Exception as e:
             failed += 1
             log(f"FAILED to process URL: {e}", "ERROR")
+            import traceback
+            traceback.print_exc()
     
     elapsed = time.time() - start_time
     print("\n" + "=" * 40)
@@ -344,7 +419,8 @@ def load_and_chunk_urls(urls: list[str], category: str, subtopic: str = None) ->
     log(f"Failed: {failed}", "SUMMARY")
     log(f"Total chunks created: {len(all_documents)}", "SUMMARY")
     log(f"Time elapsed: {elapsed:.1f} seconds", "SUMMARY")
-    log(f"Average: {elapsed/len(urls):.2f}s per URL", "SUMMARY")
+    if len(urls) > 0:
+        log(f"Average: {elapsed/len(urls):.2f}s per URL", "SUMMARY")
     print("=" * 40)
     
     return all_documents
@@ -404,7 +480,8 @@ def create_vector_store(collection, documents: list):
     log(f"Embedding and storage complete!", "EMBED")
     log(f"Successfully stored {len(documents)} document chunks", "EMBED")
     log(f"Time elapsed: {elapsed:.1f} seconds", "EMBED")
-    log(f"Average: {elapsed/len(documents)*1000:.1f}ms per chunk", "EMBED")
+    if len(documents) > 0:
+        log(f"Average: {elapsed/len(documents)*1000:.1f}ms per chunk", "EMBED")
     
     return vector_store
 
@@ -439,6 +516,18 @@ To enable vector search, create an index in MongoDB Atlas:
     {{
       "type": "filter",
       "path": "title"
+    }},
+    {{
+      "type": "filter",
+      "path": "header_1"
+    }},
+    {{
+      "type": "filter",
+      "path": "header_2"
+    }},
+    {{
+      "type": "filter",
+      "path": "header_3"
     }}
   ]
 }}
@@ -451,6 +540,9 @@ Filter fields available for queries:
   - category:  Filter by main topic (e.g., "Accounting", "Inventory")
   - subtopic:  Filter by sub-category (e.g., "Payroll", "Stock Management")
   - title:     Filter by article title
+  - header_1:  Filter by H1 header (main section)
+  - header_2:  Filter by H2 header (subsection)
+  - header_3:  Filter by H3 header (sub-subsection)
 
 After creating the index, wait for it to become "Active" before running queries.
 """)
@@ -463,8 +555,8 @@ def load_config_file(config_path: str) -> list[dict]:
     
     Expected format:
     [
-        {"url": "https://example.com/folder/1", "topic": "Topic1"},
-        {"url": "https://example.com/folder/2", "topic": "Topic2"}
+        {{"url": "https://example.com/folder/1", "topic": "Topic1"}},
+        {{"url": "https://example.com/folder/2", "topic": "Topic2"}}
     ]
     """
     log(f"Loading config file: {config_path}", "CONFIG")
@@ -494,7 +586,7 @@ def load_config_file(config_path: str) -> list[dict]:
 
 def process_single_source(crawler: WebCrawler, parent_url: str, category: str, subtopic: str = None, source_num: int = 1, total_sources: int = 1) -> list:
     """
-    Process a single URL/topic pair: crawl and chunk.
+    Process a single URL/topic pair: crawl and chunk using HTML headers.
     Returns list of document chunks.
     
     Args:
@@ -531,9 +623,9 @@ def process_single_source(crawler: WebCrawler, parent_url: str, category: str, s
         print(f"   {i:3d}. {url}")
     print("-" * 40)
     
-    # Load and chunk URLs
-    log("Loading and chunking articles...", "CHUNK")
-    documents = load_and_chunk_urls(article_urls, category, subtopic)
+    # Load and chunk URLs using HTML header-based splitting
+    log("Loading and chunking articles (HTML header-based)...", "CHUNK")
+    documents = load_and_chunk_urls_html(article_urls, category, subtopic, crawler)
     
     log(f"Source complete: {len(documents)} chunks from {len(article_urls)} articles", "SOURCE")
     
@@ -541,12 +633,12 @@ def process_single_source(crawler: WebCrawler, parent_url: str, category: str, s
 
 
 def main():
-    """Main ingestion pipeline."""
+    """Main ingestion pipeline with HTML header-based chunking."""
     pipeline_start = time.time()
     
     # Parse command line arguments
     if len(sys.argv) < 2:
-        log("Missing arguments. Usage: python web_ingestion.py --config <config_file.json>", "ERROR")
+        log("Missing arguments. Usage: python web_ingestion_html.py --config <config_file.json>", "ERROR")
         sys.exit(1)
     
     # Determine mode: single URL or config file
@@ -555,7 +647,7 @@ def main():
     if sys.argv[1] == "--config":
         # Batch mode with config file
         if len(sys.argv) < 3:
-            log("Missing config file path. Usage: python web_ingestion.py --config <config_file.json>", "ERROR")
+            log("Missing config file path. Usage: python web_ingestion_html.py --config <config_file.json>", "ERROR")
             sys.exit(1)
         
         config_path = sys.argv[2]
@@ -564,15 +656,16 @@ def main():
         # Single URL mode (backward compatible)
         sources = [{"url": sys.argv[1], "topic": sys.argv[2]}]
     else:
-        log("Invalid arguments. Usage: python web_ingestion.py <url> <topic> OR --config <config_file.json>", "ERROR")
+        log("Invalid arguments. Usage: python web_ingestion_html.py <url> <topic> OR --config <config_file.json>", "ERROR")
         sys.exit(1)
     
     print("\n" + "=" * 70)
-    print("  WEB-BASED RAG INGESTION PIPELINE")
+    print("  WEB-BASED RAG INGESTION PIPELINE (HTML Header-Based Chunking)")
     print("=" * 70)
     log("Pipeline started", "START")
     log(f"Mode: {'Batch' if len(sources) > 1 else 'Single'} ({len(sources)} source(s))", "CONFIG")
-    log(f"Chunk Size: {CHUNK_SIZE}, Overlap: {CHUNK_OVERLAP}", "CONFIG")
+    log(f"Chunking: HTML Header-based (h1, h2, h3)", "CONFIG")
+    log(f"Max chunk size: {CHUNK_SIZE}, Overlap: {CHUNK_OVERLAP}", "CONFIG")
     log(f"Request Delay: {REQUEST_DELAY}s, Timeout: {REQUEST_TIMEOUT}s", "CONFIG")
     print("=" * 70)
     
@@ -602,15 +695,15 @@ def main():
     # =========================================================================
     # Step 1: Setup MongoDB (do this first so we fail early if connection issues)
     # =========================================================================
-   # log_step(1, 3, "SETUP MONGODB CONNECTION")
-   # client, collection = setup_mongodb_collection()
-   # log("Step 1 complete: MongoDB ready", "DONE")
+    log_step(1, 3, "SETUP MONGODB CONNECTION")
+    client, collection = setup_mongodb_collection()
+    log("Step 1 complete: MongoDB ready", "DONE")
     
     try:
         # =====================================================================
         # Step 2: Crawl and chunk all sources
         # =====================================================================
-        log_step(2, 3, "CRAWL AND CHUNK ALL SOURCES")
+        log_step(2, 3, "CRAWL AND CHUNK ALL SOURCES (HTML Header-Based)")
         
         crawler = WebCrawler()
         all_documents = []
@@ -660,9 +753,9 @@ def main():
         # =====================================================================
         # Step 3: Create embeddings and store
         # =====================================================================
-       # log_step(3, 3, "CREATE EMBEDDINGS AND STORE")
-       # vector_store = create_vector_store(collection, all_documents)
-       # log("Step 3 complete: Embeddings stored", "DONE")
+        log_step(3, 3, "CREATE EMBEDDINGS AND STORE")
+        vector_store = create_vector_store(collection, all_documents)
+        log("Step 3 complete: Embeddings stored", "DONE")
         
         # =====================================================================
         # Pipeline Complete
@@ -670,13 +763,14 @@ def main():
         pipeline_elapsed = time.time() - pipeline_start
         
         print("\n" + "=" * 70)
-        print("  INGESTION PIPELINE COMPLETE!")
+        print("  INGESTION PIPELINE COMPLETE! (HTML Header-Based Chunking)")
         print("=" * 70)
         log("FINAL SUMMARY", "COMPLETE")
         print("-" * 70)
         print(f"   Database:           {DB_NAME}")
         print(f"   Collection:         {COLLECTION_NAME}")
         print(f"   Index Name:         {INDEX_NAME}")
+        print(f"   Chunking Method:    HTML Header-based (h1, h2, h3)")
         print(f"   Sources processed:  {len(sources)}")
         print(f"   Topics:             {', '.join(s['topic'] for s in sources)}")
         print(f"   Total articles:     {total_articles}")
@@ -691,7 +785,7 @@ def main():
             print(f"      - {topic_label}: {stat['articles']} articles, {stat['chunks']} chunks")
         print("=" * 70)
         
-        # Print index creation instructions
+        # Print index creation instructions (updated with header fields)
         print_vector_search_index_instructions()
         
     finally:
